@@ -22,7 +22,14 @@
   }
   main { max-width: 760px; margin: 0 auto; padding: 48px 16px; }
   h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.01em; }
-  .lead { color: var(--muted); margin: 0 0 32px; }
+  .lead { color: var(--muted); margin: 0 0 24px; }
+  .workers { margin: 0 0 12px; text-align: center; }
+  #workers { display: inline-flex; margin-left: 8px; vertical-align: middle; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  #workers label { cursor: pointer; }
+  #workers input { position: absolute; opacity: 0; }
+  #workers span { display: block; padding: 2px 14px; background: var(--card); }
+  #workers input:checked + span { background: var(--accent); color: var(--bg); }
+  #workers input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
   #drop {
     display: block; outline-offset: 4px;
     border: 2px dashed var(--line); border-radius: 12px; background: var(--card);
@@ -60,6 +67,8 @@
   <h1>Helicase in the browser</h1>
   <p class="lead">FASTA/FASTQ length statistics computed locally with WebAssembly SIMD. Your file never leaves this page.</p>
 
+  <div class="workers">Threads <div id="workers" role="radiogroup" aria-label="Threads"></div></div>
+
   <div id="drop" role="button" tabindex="0">
     <strong>Drop a FASTA or FASTQ file</strong>
     <span>or click to choose one (plain or .gz)</span>
@@ -72,55 +81,95 @@
   <div id="stats"></div>
 
   <h2>How it works</h2>
-  <pre><code>// A `Read` implementation pulling the file from JavaScript, slice by slice.
+  <pre><code>// Each worker snaps its split points to record starts.
+let start = find_record_start_in_window(&amp;window, format);
+
+// A `Read` implementation pulling the worker's range from JavaScript, slice by slice.
 let mut parser = FastxParser::&lt;CONFIG&gt;::from_reader(JsFile)?;
 while let Some(event) = parser.next() {
     event?;
     lengths.push(parser.get_dna_len());
 }</code></pre>
-  <footer>Parsing runs in a Web Worker, reading the file in 256 KiB slices with constant memory. Gzip is decompressed on the fly.</footer>
+  <footer>The file is split into one range per Web Worker, each running its own wasm instance and reading its range in 256 KiB slices. Gzip cannot be split, it is decompressed on the fly by a single worker.</footer>
 </main>
 
 <script>
-  const worker = new Worker("worker.js");
   const $ = (id) => document.getElementById(id);
   const fmt = (x) => x.toLocaleString("en-US");
+  const maxWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
+  const options = [];
+  for (let n = 1; n <= maxWorkers; n *= 2) options.push(n);
+  if (maxWorkers & (maxWorkers - 1)) options.push(maxWorkers);
+  $("workers").innerHTML = options
+    .map((n) => `<label><input type="radio" name="threads" value="${n}"${n === maxWorkers ? " checked" : ""}><span>${n}</span></label>`)
+    .join("");
+  const pool = [];
+  let busy = false;
 
-  function run(file, name) {
+  async function run(file, name) {
+    if (busy) return;
+    busy = true;
     $("status").className = "";
     $("status").textContent = `Parsing ${name}...`;
     $("stats").innerHTML = "";
     $("progress").value = 0;
     $("progress").style.display = "block";
-    worker.postMessage(file);
+    const start = performance.now();
+    // Only plain files can be split: compressed ones go to a single worker.
+    const [firstByte] = new Uint8Array(await file.slice(0, 1).arrayBuffer());
+    const plain = firstByte === 62 || firstByte === 64;
+    const count = plain && file.size >= 1 << 20 ? Number(document.querySelector("input[name=threads]:checked").value) : 1;
+    while (pool.length < count) pool.push(new Worker("worker.js"));
+    let read = 0;
+    const results = await Promise.all(pool.slice(0, count).map((worker, index) =>
+      new Promise((resolve) => {
+        worker.onmessage = ({ data }) => {
+          if (data.progress === undefined) return resolve(data);
+          read += data.progress;
+          $("progress").value = read / file.size;
+        };
+        worker.postMessage({ file, firstByte, index, count });
+      })));
+    const error = results.find((r) => r.error)?.error;
+    const r = error ? { error } : summarize(results.map((r) => r.lengths));
+    r.seconds = (performance.now() - start) / 1000;
+    show(r, file.size, count);
+    busy = false;
   }
 
-  worker.onmessage = ({ data }) => {
-    if (data.progress !== undefined) {
-      $("progress").value = data.progress;
-      return;
-    }
-    const r = data.result;
+  function summarize(chunks) {
+    const lengths = new Uint32Array(chunks.reduce((n, c) => n + c.length, 0));
+    chunks.reduce((at, c) => (lengths.set(c, at), at + c.length), 0);
+    lengths.sort();
+    let bases = 0;
+    for (const len of lengths) bases += len;
+    let acc = 0, n50 = 0;
+    for (let i = lengths.length - 1; i >= 0 && 2 * acc < bases; i--) acc += n50 = lengths[i];
+    const n = lengths.length;
+    return { records: n, bases, min_len: n ? lengths[0] : 0, max_len: n ? lengths[n - 1] : 0, n50 };
+  }
+
+  function show(r, size, count) {
     $("progress").style.display = "none";
     if (r.error) {
       $("status").className = "error";
       $("status").textContent = `Error: ${r.error}`;
       return;
     }
-    $("status").textContent = `Done in ${r.seconds.toFixed(2)} s.`;
+    $("status").textContent = `Done in ${r.seconds.toFixed(2)} s with ${count} worker${count > 1 ? "s" : ""}.`;
     const stats = [
       ["Records", fmt(r.records)],
       ["Bases", fmt(r.bases)],
       ["N50", fmt(r.n50)],
       ["Min length", fmt(r.min_len)],
       ["Max length", fmt(r.max_len)],
-      ["Throughput", `${(r.size / r.seconds / 1e6).toFixed(0)} MB/s`, true],
+      ["Throughput", `${(size / r.seconds / 1e6).toFixed(0)} MB/s`, true],
     ];
     $("stats").innerHTML = stats
       .map(([label, value, hl]) =>
         `<div class="stat${hl ? " hl" : ""}"><div class="label">${label}</div><div class="value">${value}</div></div>`)
       .join("");
-  };
+  }
 
   $("file").onchange = (e) => {
     const file = e.target.files[0];

@@ -1,0 +1,30 @@
+[package]
+name = "helicase-wasm-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone workspace, built for wasm32 only.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Unreleased: the simd128 backend is not on crates.io yet.
+helicase = { git = "https://github.com/imartayan/helicase", branch = "dev", default-features = false, features = [
+    "std",
+    "gz",
+] }
+
+# Opt-in formats, e.g. `./run.sh --features zstd`. zstd and xz compile C to wasm,
+# they need a clang with the wasm32 target (e.g. CC=$(brew --prefix llvm)/bin/clang).
+[features]
+bz2 = ["helicase/bz2"]
+xz = ["helicase/xz"]
+zstd = ["helicase/zstd"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

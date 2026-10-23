@@ -24,4 +24,4 @@ rustc-ice-*.txt
 #.idea/
 
 Cargo.lock
-www/*.wasm
+**/www/*.wasm

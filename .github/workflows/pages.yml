@@ -17,20 +17,23 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: single-thread
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --target wasm32-unknown-unknown
-        env:
-          RUSTFLAGS: -C target-feature=+simd128
-      - run: cp target/wasm32-unknown-unknown/release/helicase_wasm_demo.wasm www/
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
         with:
-          path: www
+          workspaces: single-thread
+      - run: cargo build --release --target wasm32-unknown-unknown
+      - run: cp target/wasm32-unknown-unknown/release/helicase_wasm_demo.wasm www/
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: single-thread/www
 
   deploy:
     needs: build
@@ -40,4 +43,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

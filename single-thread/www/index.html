@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Helicase in the browser</title>
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4;
+    --card: #ffffff; --accent: #0f766e; --accent-soft: #ccfbf1; --error: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1917; --fg: #f5f5f4; --muted: #a8a29e; --line: #44403c;
+      --card: #292524; --accent: #2dd4bf; --accent-soft: #134e4a; --error: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 16px; }
+  h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .lead { color: var(--muted); margin: 0 0 32px; }
+  #drop {
+    display: block; outline-offset: 4px;
+    border: 2px dashed var(--line); border-radius: 12px; background: var(--card);
+    padding: 40px 16px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #drop strong { display: block; font-size: 18px; margin-bottom: 4px; }
+  #drop span { color: var(--muted); font-size: 14px; }
+  .actions { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
+  button {
+    font: inherit; color: var(--accent); background: none; border: 0; padding: 0;
+    cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
+  #status { margin: 24px 0 8px; min-height: 24px; font-size: 14px; color: var(--muted); }
+  #status.error { color: var(--error); }
+  progress { width: 100%; height: 6px; accent-color: var(--accent); display: none; }
+  #stats {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px; margin-top: 16px;
+  }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .stat .label { font-size: 13px; color: var(--muted); }
+  .stat .value { font-size: clamp(15px, 4vw, 22px); overflow-wrap: anywhere; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat.hl .value { color: var(--accent); }
+  h2 { font-size: 16px; margin: 40px 0 8px; }
+  pre {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.6;
+  }
+  footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Helicase in the browser</h1>
+  <p class="lead">FASTA/FASTQ length statistics computed locally with WebAssembly SIMD. Your file never leaves this page.</p>
+
+  <div id="drop" role="button" tabindex="0">
+    <strong>Drop a FASTA or FASTQ file</strong>
+    <span>or click to choose one (plain or .gz)</span>
+  </div>
+  <input id="file" type="file" hidden>
+  <p class="actions">No file at hand? <button id="sample">Generate 100 MB of Illumina-like reads</button></p>
+
+  <p id="status"></p>
+  <progress id="progress" max="1" value="0"></progress>
+  <div id="stats"></div>
+
+  <h2>How it works</h2>
+  <pre><code>// A `Read` implementation pulling the file from JavaScript, slice by slice.
+let mut parser = FastxParser::&lt;CONFIG&gt;::from_reader(JsFile)?;
+while let Some(event) = parser.next() {
+    event?;
+    lengths.push(parser.get_dna_len());
+}</code></pre>
+  <footer>Parsing runs in a Web Worker, reading the file in 16 MiB slices with constant memory. Gzip is decompressed on the fly.</footer>
+</main>
+
+<script>
+  const worker = new Worker("worker.js");
+  const $ = (id) => document.getElementById(id);
+  const fmt = (x) => x.toLocaleString("en-US");
+
+  function run(file, name) {
+    $("status").className = "";
+    $("status").textContent = `Parsing ${name}...`;
+    $("stats").innerHTML = "";
+    $("progress").value = 0;
+    $("progress").style.display = "block";
+    worker.postMessage(file);
+  }
+
+  worker.onmessage = ({ data }) => {
+    if (data.progress !== undefined) {
+      $("progress").value = data.progress;
+      return;
+    }
+    const r = data.result;
+    $("progress").style.display = "none";
+    if (r.error) {
+      $("status").className = "error";
+      $("status").textContent = `Error: ${r.error}`;
+      return;
+    }
+    $("status").textContent = `Done in ${r.seconds.toFixed(2)} s.`;
+    const stats = [
+      ["Records", fmt(r.records)],
+      ["Bases", fmt(r.bases)],
+      ["N50", fmt(r.n50)],
+      ["Min length", fmt(r.min_len)],
+      ["Max length", fmt(r.max_len)],
+      ["Throughput", `${(r.size / r.seconds / 1e6).toFixed(0)} MB/s`, true],
+    ];
+    $("stats").innerHTML = stats
+      .map(([label, value, hl]) =>
+        `<div class="stat${hl ? " hl" : ""}"><div class="label">${label}</div><div class="value">${value}</div></div>`)
+      .join("");
+  };
+
+  $("file").onchange = (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (file) run(file, file.name);
+  };
+  const drop = $("drop");
+  drop.onclick = () => $("file").click();
+  drop.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && $("file").click();
+  // Firefox needs both dragenter and dragover cancelled to accept a drop.
+  for (const type of ["dragenter", "dragover"]) {
+    drop.addEventListener(type, (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      drop.classList.add("over");
+    });
+  }
+  drop.ondragleave = (e) => !drop.contains(e.relatedTarget) && drop.classList.remove("over");
+  drop.ondrop = (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    const file = e.dataTransfer.files[0];
+    if (file) run(file, file.name);
+  };
+  // A drop outside the zone would otherwise open the file in the tab.
+  for (const type of ["dragover", "drop"]) window.addEventListener(type, (e) => e.preventDefault());
+
+  // 150 bp reads, with qualities, about 330 bytes per record.
+  $("sample").onclick = () => {
+    const parts = [];
+    const bases = "ACGT";
+    let seed = 42;
+    const rand = () => (seed = (seed * 1103515245 + 12345) >>> 0) >>> 16;
+    const qual = "I".repeat(150);
+    for (let i = 0; i < 300_000; i++) {
+      let seq = "";
+      for (let j = 0; j < 150; j++) seq += bases[rand() & 3];
+      parts.push(`@read_${i}\n${seq}\n+\n${qual}\n`);
+    }
+    run(new Blob(parts), "the generated sample");
+  };
+</script>
+</body>
+</html>
