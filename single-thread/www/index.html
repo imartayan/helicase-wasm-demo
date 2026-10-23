@@ -160,7 +160,7 @@ while let Some(event) = parser.next() {
       for (let j = 0; j < 150; j++) seq += bases[rand() & 3];
       parts.push(`@read_${i}\n${seq}\n+\n${qual}\n`);
     }
-    run(new Blob(parts), "the generated sample");
+    run(new Blob([parts.join("")]), "the generated sample");
   };
 </script>
 </body>
